@@ -157,7 +157,7 @@ Example: (setq roam-inline-ignore-files \\='(\"fleeting\\\\.org\\\\'\"))"
     (user-error "ripgrep not found"))
   (with-temp-buffer
     (call-process roam-inline-rg-executable nil t nil
-                  "--line-number" "--no-heading" "--fixed-strings"
+                  "--line-number" "--no-heading" "--fixed-strings" "--word-regexp"
                   "--ignore-case" "--glob" "*.org" "--"
                   term (expand-file-name org-roam-directory))
     (goto-char (point-min))
