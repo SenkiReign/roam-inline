@@ -4,6 +4,7 @@
 ;;; Code:
 
 (require 'org-roam)
+(require 'org-roam-mode)
 (require 'seq)
 
 (defgroup roam-inline nil "Inline org-roam backlinks." :group 'org-roam)
@@ -15,6 +16,12 @@
 (defcustom roam-inline-rg-executable "rg"
   "Ripgrep binary for unlinked references."
   :type 'string :group 'roam-inline)
+
+(defcustom roam-inline-ignore-files nil
+  "Filenames or regexps to exclude from `roam-inline-mode'.
+Matched against the buffer's full file path.
+Example: (setq roam-inline-ignore-files \\='(\"fleeting\\\\.org\\\\'\"))"
+  :type '(repeat string) :group 'roam-inline)
 
 (defvar-local roam-inline--beg nil)
 (defvar-local roam-inline--end nil)
@@ -31,7 +38,9 @@
   (when (and buffer-file-name
              org-roam-directory
              (file-in-directory-p buffer-file-name
-                                   (expand-file-name org-roam-directory)))
+                                   (expand-file-name org-roam-directory))
+             (not (seq-some (lambda (pat) (string-match-p pat buffer-file-name))
+                             roam-inline-ignore-files)))
     (roam-inline-mode 1)))
 
 ;;;###autoload
@@ -89,20 +98,29 @@
 
 (defun roam-inline--insert-backlink (backlink)
   (let* ((src (org-roam-backlink-source-node backlink))
+         (file (org-roam-node-file src))
+         (pt (org-roam-backlink-point backlink))
          (beg (point)))
     (insert (format "** %s\n   %s\n"
                      (org-roam-node-title src)
-                     (roam-inline--snippet backlink)))
+                     (roam-inline--content file pt)))
     (set-text-properties beg (point)
-                          (list 'roam-inline-file (org-roam-node-file src)
-                                'roam-inline-point (org-roam-backlink-point backlink)))))
+                          (list 'roam-inline-file file 'roam-inline-point pt))))
 
-(defun roam-inline--snippet (backlink)
-  (let* ((raw (or (plist-get (org-roam-backlink-properties backlink) :outline) ""))
-         (text (if (listp raw) (mapconcat #'identity raw " > ") raw)))
-    (truncate-string-to-width
-     (replace-regexp-in-string "\n" " " (string-trim text))
-     roam-inline-preview-length nil nil "…")))
+(defun roam-inline--content (file point)
+  (or (ignore-errors
+        (with-temp-buffer
+          (insert-file-contents file)
+          (goto-char point)
+          (let (beg end)
+            (backward-sentence)
+            (setq beg (point))
+            (forward-sentence)
+            (setq end (point))
+            (truncate-string-to-width
+             (replace-regexp-in-string "\n+" " " (string-trim (buffer-substring beg end)))
+             roam-inline-preview-length nil nil "…"))))
+      ""))
 
 ;; Unlinked references, via ripgrep
 
