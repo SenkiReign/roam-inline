@@ -106,6 +106,12 @@ Example: (setq roam-inline-ignore-files \\='(\"fleeting\\\\.org\\\\'\"))"
     (set-text-properties beg (point)
                           (list 'roam-inline-file file 'roam-inline-point pt))))
 
+(defun roam-inline--clean-links (text)
+  "Replace org link syntax in TEXT with just its description/target."
+  (let ((text (replace-regexp-in-string
+               "\\[\\[[^]]*\\]\\[\\([^]]*\\)\\]\\]" "\\1" text)))
+    (replace-regexp-in-string "\\[\\[\\([^]]*\\)\\]\\]" "\\1" text)))
+
 (defconst roam-inline--drawer-re
   "^[ \t]*:[A-Za-z_-]+:\n\\(?:.*\n\\)*?[ \t]*:END:\n?"
   "Matches a :PROPERTIES:/:LOGBOOK:/etc drawer block.")
@@ -126,6 +132,7 @@ Example: (setq roam-inline-ignore-files \\='(\"fleeting\\\\.org\\\\'\"))"
             (setq end (min (point) heading-end))
             (setq raw (buffer-substring (min beg end) (max beg end)))
             (setq clean (replace-regexp-in-string roam-inline--drawer-re "" raw))
+            (setq clean (roam-inline--clean-links clean))
             (truncate-string-to-width
              (replace-regexp-in-string "\n+" " " (string-trim clean))
              roam-inline-preview-length nil nil "…"))))
