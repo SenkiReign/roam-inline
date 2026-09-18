@@ -121,15 +121,30 @@ Example: (setq roam-inline-ignore-files \\='(\"fleeting\\\\.org\\\\'\"))"
         (with-temp-buffer
           (insert-file-contents file)
           (goto-char point)
-          (let* ((heading-beg (save-excursion
-                                 (if (re-search-backward "^\\*+ " nil t) (point) (point-min))))
+          (let* ((on-heading (progn (beginning-of-line) (looking-at "\\*+ ")))
+                 (heading-beg (if on-heading (point)
+                                 (save-excursion
+                                   (if (re-search-backward "^\\*+ " nil t) (point) (point-min)))))
                  (heading-end (save-excursion
+                                (goto-char point) (end-of-line)
                                 (if (re-search-forward "^\\*+ " nil t) (match-beginning 0) (point-max))))
                  beg end raw clean)
-            (goto-char point) (backward-sentence)
-            (setq beg (max (point) heading-beg))
-            (goto-char point) (forward-sentence)
-            (setq end (min (point) heading-end))
+            (if on-heading
+                ;; link is the heading itself: use the entry's body text, not the title
+                (progn
+                  (goto-char heading-beg) (forward-line 1)
+                  (when (looking-at "[ \t]*:PROPERTIES:")
+                    (re-search-forward "^[ \t]*:END:" heading-end t)
+                    (forward-line 1))
+                  (skip-chars-forward " \t\n" heading-end)
+                  (setq beg (point))
+                  (forward-sentence)
+                  (setq end (min (point) heading-end)))
+              (progn
+                (goto-char point) (backward-sentence)
+                (setq beg (max (point) heading-beg))
+                (goto-char point) (forward-sentence)
+                (setq end (min (point) heading-end))))
             (setq raw (buffer-substring (min beg end) (max beg end)))
             (setq clean (replace-regexp-in-string roam-inline--drawer-re "" raw))
             (setq clean (roam-inline--clean-links clean))
