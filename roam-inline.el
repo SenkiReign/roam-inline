@@ -81,14 +81,13 @@ Example: (setq roam-inline-ignore-files \\='(\"fleeting\\\\.org\\\\'\"))"
         (goto-char (point-max))
         (unless (bolp) (insert "\n"))
         (let ((beg (point)))
-          (insert (format "* Backlinks (%d)\n" (length backlinks)))
-          (if (null backlinks)
-              (insert "  (none)\n")
+          (when backlinks
+            (insert (format "* Backlinks (%d)\n" (length backlinks)))
             (dolist (bl (seq-sort-by (lambda (b) (org-roam-node-title
                                                    (org-roam-backlink-source-node b)))
                                       #'string< backlinks))
-              (roam-inline--insert-backlink bl)))
-          (insert "\n")
+              (roam-inline--insert-backlink bl))
+            (insert "\n"))
           (roam-inline--insert-unlinked-section node)
           (put-text-property beg (point) 'read-only t)
           (put-text-property beg (1+ beg) 'front-sticky '(read-only))
@@ -107,18 +106,28 @@ Example: (setq roam-inline-ignore-files \\='(\"fleeting\\\\.org\\\\'\"))"
     (set-text-properties beg (point)
                           (list 'roam-inline-file file 'roam-inline-point pt))))
 
+(defconst roam-inline--drawer-re
+  "^[ \t]*:[A-Za-z_-]+:\n\\(?:.*\n\\)*?[ \t]*:END:\n?"
+  "Matches a :PROPERTIES:/:LOGBOOK:/etc drawer block.")
+
 (defun roam-inline--content (file point)
   (or (ignore-errors
         (with-temp-buffer
           (insert-file-contents file)
           (goto-char point)
-          (let (beg end)
-            (backward-sentence)
-            (setq beg (point))
-            (forward-sentence)
-            (setq end (point))
+          (let* ((heading-beg (save-excursion
+                                 (if (re-search-backward "^\\*+ " nil t) (point) (point-min))))
+                 (heading-end (save-excursion
+                                (if (re-search-forward "^\\*+ " nil t) (match-beginning 0) (point-max))))
+                 beg end raw clean)
+            (goto-char point) (backward-sentence)
+            (setq beg (max (point) heading-beg))
+            (goto-char point) (forward-sentence)
+            (setq end (min (point) heading-end))
+            (setq raw (buffer-substring (min beg end) (max beg end)))
+            (setq clean (replace-regexp-in-string roam-inline--drawer-re "" raw))
             (truncate-string-to-width
-             (replace-regexp-in-string "\n+" " " (string-trim (buffer-substring beg end)))
+             (replace-regexp-in-string "\n+" " " (string-trim clean))
              roam-inline-preview-length nil nil "…"))))
       ""))
 
