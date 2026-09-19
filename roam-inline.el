@@ -23,9 +23,16 @@ Matched against the buffer's full file path.
 Example: (setq roam-inline-ignore-files \\='(\"fleeting\\\\.org\\\\'\"))"
   :type '(repeat string) :group 'roam-inline)
 
-(defvar-local roam-inline--beg nil)
-(defvar-local roam-inline--end nil)
+(defcustom roam-inline-anchor "#+ROAM_INLINE:"
+  "Line after which the section is inserted.
+Move this line to move the section.  If the buffer has no such line, the
+section goes at the end of the buffer.  See `roam-inline-move-here'."
+  :type 'string :group 'roam-inline)
+
 (defvar-local roam-inline-show-unlinked nil)
+
+(defun roam-inline--anchor-regexp ()
+  (concat "^" (regexp-quote roam-inline-anchor) "[ \t]*$"))
 
 (defvar roam-inline-map
   (let ((m (make-sparse-keymap)))
@@ -51,10 +58,14 @@ Example: (setq roam-inline-ignore-files \\='(\"fleeting\\\\.org\\\\'\"))"
       (progn
         (add-hook 'before-save-hook #'roam-inline--prune nil t)
         (add-hook 'after-save-hook #'roam-inline-refresh nil t)
+        (add-hook 'after-revert-hook #'roam-inline-refresh nil t)
         (roam-inline-refresh))
     (remove-hook 'before-save-hook #'roam-inline--prune t)
     (remove-hook 'after-save-hook #'roam-inline-refresh t)
-    (roam-inline--prune)))
+    (remove-hook 'after-revert-hook #'roam-inline-refresh t)
+    (let ((modified (buffer-modified-p)))
+      (roam-inline--prune)
+      (set-buffer-modified-p modified))))
 
 (defun roam-inline-refresh ()
   (interactive)
@@ -63,12 +74,50 @@ Example: (setq roam-inline-ignore-files \\='(\"fleeting\\\\.org\\\\'\"))"
     (roam-inline--insert)
     (set-buffer-modified-p modified)))
 
+;; The section is found by text properties, not by markers.  Every generated
+;; character carries `roam-inline-managed'; the first one also carries
+;; `roam-inline-start'.  Pruning deletes every such run wherever it is, so a
+;; copied, pasted or moved section can never be written to disk, and a buffer
+;; revert can never leave stale positions that delete real text.
+
 (defun roam-inline--prune ()
-  (when (and roam-inline--beg roam-inline--end)
-    (let ((inhibit-read-only t)
-          (buffer-undo-list t))
-      (save-excursion (delete-region roam-inline--beg roam-inline--end)))
-    (setq roam-inline--beg nil roam-inline--end nil)))
+  "Delete every generated section in the buffer."
+  (let ((inhibit-read-only t)
+        (buffer-undo-list t))
+    (save-excursion
+      (save-restriction
+        (widen)
+        (remove-overlays (point-min) (point-max) 'roam-inline t)
+        (let ((pos (point-min)) start)
+          (while (setq start (text-property-any pos (point-max) 'roam-inline-start t))
+            (if (get-text-property start 'roam-inline-managed)
+                (delete-region
+                 start (or (next-single-property-change start 'roam-inline-managed)
+                           (point-max)))
+              (remove-text-properties start (1+ start) '(roam-inline-start nil)))
+            (setq pos start)))))))
+
+(defun roam-inline--goto-anchor ()
+  "Move point to where the section goes.
+Return non-nil when an anchor line was used."
+  (goto-char (point-min))
+  (if (re-search-forward (roam-inline--anchor-regexp) nil t)
+      (progn (end-of-line) t)
+    (goto-char (point-max))
+    (unless (bolp) (insert "\n"))
+    nil))
+
+(defun roam-inline--seal (beg end)
+  "Mark BEG..END as generated, read-only, and bind the section keymap."
+  (add-text-properties beg end '(roam-inline-managed t
+                                 read-only t
+                                 rear-nonsticky (roam-inline-managed)))
+  (add-text-properties beg (1+ beg) '(roam-inline-start t
+                                      front-sticky (read-only)))
+  (let ((ov (make-overlay beg end)))
+    (overlay-put ov 'keymap roam-inline-map)
+    (overlay-put ov 'roam-inline t)
+    (overlay-put ov 'evaporate t)))
 
 (defun roam-inline--insert ()
   (when-let* ((node (or (org-roam-node-at-point)
@@ -78,22 +127,41 @@ Example: (setq roam-inline-ignore-files \\='(\"fleeting\\\\.org\\\\'\"))"
            (inhibit-read-only t)
            (buffer-undo-list t))
       (save-excursion
-        (goto-char (point-max))
-        (unless (bolp) (insert "\n"))
-        (let ((beg (point)))
-          (when backlinks
-            (insert (format "* Backlinks (%d)\n" (length backlinks)))
-            (dolist (bl (seq-sort-by (lambda (b) (org-roam-node-title
-                                                   (org-roam-backlink-source-node b)))
-                                      #'string< backlinks))
-              (roam-inline--insert-backlink bl))
-            (insert "\n"))
-          (roam-inline--insert-unlinked-section node)
-          (put-text-property beg (point) 'read-only t)
-          (put-text-property beg (1+ beg) 'front-sticky '(read-only))
-          (overlay-put (make-overlay beg (point)) 'keymap roam-inline-map)
-          (setq roam-inline--beg (copy-marker beg))
-          (setq roam-inline--end (copy-marker (point) t)))))))
+        (save-restriction
+          (widen)
+          (let* ((anchored (roam-inline--goto-anchor))
+                 (beg (point)))
+            ;; With an anchor, the section begins with the newline that ends
+            ;; the anchor line, so prune restores the buffer exactly.
+            (when anchored (insert "\n"))
+            (when backlinks
+              (insert (format "* Backlinks (%d)\n" (length backlinks)))
+              (dolist (bl (seq-sort-by (lambda (b) (org-roam-node-title
+                                                     (org-roam-backlink-source-node b)))
+                                       #'string< backlinks))
+                (roam-inline--insert-backlink bl))
+              (insert "\n"))
+            (roam-inline--insert-unlinked-section node)
+            (roam-inline--seal beg (point))))))))
+
+;;;###autoload
+(defun roam-inline-move-here ()
+  "Move the backlinks section to the start of the current line.
+Writes the anchor line (`roam-inline-anchor') there and removes any other.
+The section is generated, so move it with this command or by moving the
+anchor line, not by cutting and pasting the section itself."
+  (interactive)
+  (roam-inline--prune)
+  (let ((here (copy-marker (line-beginning-position))))
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward (roam-inline--anchor-regexp) nil t)
+        (delete-region (line-beginning-position)
+                       (min (point-max) (1+ (line-end-position))))))
+    (goto-char here)
+    (insert roam-inline-anchor "\n")
+    (set-marker here nil))
+  (roam-inline-refresh))
 
 (defun roam-inline--insert-backlink (backlink)
   (let* ((src (org-roam-backlink-source-node backlink))
