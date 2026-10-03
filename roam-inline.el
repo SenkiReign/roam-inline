@@ -2,7 +2,7 @@
 ;; Package-Requires: ((emacs "27.1") (org-roam "2.0"))
 
 ;;; Code:
-
+;;; Version: 0.4
 (require 'org-roam)
 (require 'org-roam-mode)
 (require 'seq)
@@ -27,6 +27,12 @@ Example: (setq roam-inline-ignore-files \\='(\"fleeting\\\\.org\\\\'\"))"
   "Line after which the section is inserted.
 Move this line to move the section.  If the buffer has no such line, the
 section goes at the end of the buffer.  See `roam-inline-move-here'."
+  :type 'string :group 'roam-inline)
+
+(defcustom roam-inline-separator "\n-------\n\n"
+  "Text inserted before backlinks and unlinked references.
+A newline is appended if the text does not end with one.
+Set to an empty string to omit the separator."
   :type 'string :group 'roam-inline)
 
 (defvar-local roam-inline-show-unlinked nil)
@@ -134,6 +140,10 @@ Return non-nil when an anchor line was used."
             ;; With an anchor, the section begins with the newline that ends
             ;; the anchor line, so prune restores the buffer exactly.
             (when anchored (insert "\n"))
+            (unless (string-empty-p roam-inline-separator)
+              (insert roam-inline-separator)
+              (unless (string-suffix-p "\n" roam-inline-separator)
+                (insert "\n")))
             (when backlinks
               (insert (format "* Backlinks (%d)\n" (length backlinks)))
               (dolist (bl (seq-sort-by (lambda (b) (org-roam-node-title
@@ -239,21 +249,21 @@ anchor line, not by cutting and pasting the section itself."
     (roam-inline-refresh)))
 
 (defun roam-inline--insert-unlinked-refs (node)
-  (let* ((terms (cons (org-roam-node-title node) (org-roam-node-aliases node)))
-         (self-file (org-roam-node-file node))
-         (hits (seq-mapcat (lambda (term) (roam-inline--rg-search term self-file)) terms)))
-    (if (null hits)
-        (insert "  (none)\n")
-      (pcase-dolist (`(,file ,line ,text) hits)
-        (let ((beg (point)))
-          (insert (format "- %s:%s: %s\n"
-                           (file-name-nondirectory file) line (string-trim text)))
-          (put-text-property beg (point) 'roam-inline-file file)
-          (put-text-property beg (point) 'roam-inline-line (string-to-number line)))))))
+  (if (not (executable-find roam-inline-rg-executable))
+      (insert "  (ripgrep not found)\n")
+    (let* ((terms (cons (org-roam-node-title node) (org-roam-node-aliases node)))
+           (self-file (org-roam-node-file node))
+           (hits (seq-mapcat (lambda (term) (roam-inline--rg-search term self-file)) terms)))
+      (if (null hits)
+          (insert "  (none)\n")
+        (pcase-dolist (`(,file ,line ,text) hits)
+          (let ((beg (point)))
+            (insert (format "- %s:%s: %s\n"
+                             (file-name-nondirectory file) line (string-trim text)))
+            (put-text-property beg (point) 'roam-inline-file file)
+            (put-text-property beg (point) 'roam-inline-line (string-to-number line))))))))
 
 (defun roam-inline--rg-search (term self-file)
-  (unless (executable-find roam-inline-rg-executable)
-    (user-error "ripgrep not found"))
   (with-temp-buffer
     (call-process roam-inline-rg-executable nil t nil
                   "--line-number" "--no-heading" "--fixed-strings" "--word-regexp"
