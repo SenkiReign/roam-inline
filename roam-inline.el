@@ -2,7 +2,7 @@
 ;; Package-Requires: ((emacs "27.1") (org-roam "2.0"))
 
 ;;; Code:
-;;; Version: 0.6
+;;; Version: 0.6.1
 (require 'org-roam)
 (require 'org-roam-mode)
 (require 'seq)
@@ -133,9 +133,10 @@ Return non-nil when an anchor line was used."
 (defun roam-inline--insert ()
   (when-let* ((node (or (org-roam-node-at-point)
                         (progn (ignore-errors (org-roam-db-update-file (buffer-file-name)))
-                               (org-roam-node-at-point)))))
-    (let* ((backlinks (org-roam-backlinks-get node))
-           (inhibit-read-only t)
+                               (org-roam-node-at-point))))
+              ;; No backlinks: add no section at all.
+              (backlinks (org-roam-backlinks-get node)))
+    (let* ((inhibit-read-only t)
            (buffer-undo-list t)
            (roam-inline--file-cache (make-hash-table :test #'equal)))
       (unwind-protect
@@ -151,8 +152,7 @@ Return non-nil when an anchor line was used."
                   (insert roam-inline-separator)
                   (unless (string-suffix-p "\n" roam-inline-separator)
                     (insert "\n")))
-                (when backlinks
-                  (roam-inline--insert-backlinks backlinks))
+                (roam-inline--insert-backlinks backlinks)
                 (roam-inline--insert-unlinked-section node)
                 (roam-inline--seal beg (point)))))
         (maphash (lambda (_file buf) (when (buffer-live-p buf) (kill-buffer buf)))
