@@ -2,7 +2,7 @@
 ;; Package-Requires: ((emacs "27.1") (org-roam "2.0"))
 
 ;;; Code:
-;;; Version: 0.4
+;;; Version: 0.5
 (require 'org-roam)
 (require 'org-roam-mode)
 (require 'seq)
@@ -129,7 +129,7 @@ Return non-nil when an anchor line was used."
   (when-let* ((node (or (org-roam-node-at-point)
                         (progn (ignore-errors (org-roam-db-update-file (buffer-file-name)))
                                (org-roam-node-at-point)))))
-    (let* ((backlinks (org-roam-backlinks-get node :unique t))
+    (let* ((backlinks (org-roam-backlinks-get node))
            (inhibit-read-only t)
            (buffer-undo-list t))
       (save-excursion
@@ -145,12 +145,7 @@ Return non-nil when an anchor line was used."
               (unless (string-suffix-p "\n" roam-inline-separator)
                 (insert "\n")))
             (when backlinks
-              (insert (format "* Backlinks (%d)\n" (length backlinks)))
-              (dolist (bl (seq-sort-by (lambda (b) (org-roam-node-title
-                                                     (org-roam-backlink-source-node b)))
-                                       #'string< backlinks))
-                (roam-inline--insert-backlink bl))
-              (insert "\n"))
+              (roam-inline--insert-backlinks backlinks))
             (roam-inline--insert-unlinked-section node)
             (roam-inline--seal beg (point))))))))
 
@@ -173,16 +168,7 @@ anchor line, not by cutting and pasting the section itself."
     (set-marker here nil))
   (roam-inline-refresh))
 
-(defun roam-inline--insert-backlink (backlink)
-  (let* ((src (org-roam-backlink-source-node backlink))
-         (file (org-roam-node-file src))
-         (pt (org-roam-backlink-point backlink))
-         (beg (point)))
-    (insert (format "** %s\n   %s\n"
-                     (org-roam-node-title src)
-                     (roam-inline--content file pt)))
-    (set-text-properties beg (point)
-                          (list 'roam-inline-file file 'roam-inline-point pt))))
+;; Backlinks: one group per source node, one bullet per occurrence
 
 (defun roam-inline--clean-links (text)
   "Replace org link syntax in TEXT with just its description/target."
@@ -190,46 +176,71 @@ anchor line, not by cutting and pasting the section itself."
                "\\[\\[[^]]*\\]\\[\\([^]]*\\)\\]\\]" "\\1" text)))
     (replace-regexp-in-string "\\[\\[\\([^]]*\\)\\]\\]" "\\1" text)))
 
-(defconst roam-inline--drawer-re
-  "^[ \t]*:[A-Za-z_-]+:\n\\(?:.*\n\\)*?[ \t]*:END:\n?"
-  "Matches a :PROPERTIES:/:LOGBOOK:/etc drawer block.")
+(defun roam-inline--own-heading-p (node-id)
+  "Non-nil if point is on a heading whose property drawer holds NODE-ID."
+  (and (looking-at "\\*+ ")
+       (save-excursion
+         (forward-line 1)
+         (and (looking-at "[ \t]*:PROPERTIES:")
+              (let ((end (save-excursion (re-search-forward "^[ \t]*:END:" nil t))))
+                (and end
+                     (re-search-forward
+                      (concat "^[ \t]*:ID:[ \t]+" (regexp-quote node-id) "[ \t]*$")
+                      end t)))))))
 
-(defun roam-inline--content (file point)
+(defun roam-inline--content (file point node-id)
+  "Return a one-line preview for the link at POINT in FILE.
+This is the line containing the link, minus list bullet or heading stars.
+If that line is the heading of the source node itself (NODE-ID), the
+group title already shows it, so return an empty string."
   (or (ignore-errors
         (with-temp-buffer
           (insert-file-contents file)
           (goto-char point)
-          (let* ((on-heading (progn (beginning-of-line) (looking-at "\\*+ ")))
-                 (heading-beg (if on-heading (point)
-                                 (save-excursion
-                                   (if (re-search-backward "^\\*+ " nil t) (point) (point-min)))))
-                 (heading-end (save-excursion
-                                (goto-char point) (end-of-line)
-                                (if (re-search-forward "^\\*+ " nil t) (match-beginning 0) (point-max))))
-                 beg end raw clean)
-            (if on-heading
-                ;; link is the heading itself: use the entry's body text, not the title
-                (progn
-                  (goto-char heading-beg) (forward-line 1)
-                  (when (looking-at "[ \t]*:PROPERTIES:")
-                    (re-search-forward "^[ \t]*:END:" heading-end t)
-                    (forward-line 1))
-                  (skip-chars-forward " \t\n" heading-end)
-                  (setq beg (point))
-                  (forward-sentence)
-                  (setq end (min (point) heading-end)))
-              (progn
-                (goto-char point) (backward-sentence)
-                (setq beg (max (point) heading-beg))
-                (goto-char point) (forward-sentence)
-                (setq end (min (point) heading-end))))
-            (setq raw (buffer-substring (min beg end) (max beg end)))
-            (setq clean (replace-regexp-in-string roam-inline--drawer-re "" raw))
-            (setq clean (roam-inline--clean-links clean))
-            (truncate-string-to-width
-             (replace-regexp-in-string "\n+" " " (string-trim clean))
-             roam-inline-preview-length nil nil "…"))))
+          (beginning-of-line)
+          (if (roam-inline--own-heading-p node-id)
+              ""
+            (let ((line (buffer-substring (line-beginning-position)
+                                          (line-end-position))))
+              (setq line (replace-regexp-in-string
+                          "\\`[ \t]*\\(?:\\*+\\|[-+]\\|[0-9]+[.)]\\)[ \t]+" "" line))
+              (truncate-string-to-width
+               (string-trim (roam-inline--clean-links line))
+               roam-inline-preview-length nil nil "…")))))
       ""))
+
+(defun roam-inline--insert-backlink (backlink)
+  "Insert one bullet for BACKLINK, unless it has nothing to preview."
+  (let* ((src (org-roam-backlink-source-node backlink))
+         (file (org-roam-node-file src))
+         (pt (org-roam-backlink-point backlink))
+         (text (roam-inline--content file pt (org-roam-node-id src)))
+         (beg (point)))
+    (unless (string-empty-p text)
+      (insert (format "   - %s\n" text))
+      (set-text-properties beg (point)
+                           (list 'roam-inline-file file 'roam-inline-point pt)))))
+
+(defun roam-inline--insert-backlinks (backlinks)
+  "Insert BACKLINKS grouped by source node, one bullet per occurrence.
+The group heading is also followable, so a link with no preview stays reachable."
+  (insert (format "* Backlinks (%d)\n" (length backlinks)))
+  (let ((groups (seq-group-by
+                 (lambda (b) (org-roam-node-id (org-roam-backlink-source-node b)))
+                 backlinks)))
+    (dolist (g (seq-sort-by
+                (lambda (g) (org-roam-node-title
+                             (org-roam-backlink-source-node (cadr g))))
+                #'string< groups))
+      (let* ((bls (seq-sort-by #'org-roam-backlink-point #'< (cdr g)))
+             (src (org-roam-backlink-source-node (car bls)))
+             (beg (point)))
+        (insert (format "** %s\n" (org-roam-node-title src)))
+        (set-text-properties beg (point)
+                             (list 'roam-inline-file (org-roam-node-file src)
+                                   'roam-inline-point (org-roam-backlink-point (car bls))))
+        (mapc #'roam-inline--insert-backlink bls))))
+  (insert "\n"))
 
 ;; Unlinked references, via ripgrep
 
