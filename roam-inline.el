@@ -2,7 +2,7 @@
 ;; Package-Requires: ((emacs "27.1") (org-roam "2.0"))
 
 ;;; Code:
-;;; Version: 0.5
+;;; Version: 0.6
 (require 'org-roam)
 (require 'org-roam-mode)
 (require 'seq)
@@ -36,6 +36,11 @@ Set to an empty string to omit the separator."
   :type 'string :group 'roam-inline)
 
 (defvar-local roam-inline-show-unlinked nil)
+
+(defvar roam-inline--file-cache nil
+  "Hash table of FILE -> buffer holding its contents, bound during a refresh.
+Each source file is read from disk once per refresh, however many
+backlinks point into it.")
 
 (defun roam-inline--anchor-regexp ()
   (concat "^" (regexp-quote roam-inline-anchor) "[ \t]*$"))
@@ -131,23 +136,27 @@ Return non-nil when an anchor line was used."
                                (org-roam-node-at-point)))))
     (let* ((backlinks (org-roam-backlinks-get node))
            (inhibit-read-only t)
-           (buffer-undo-list t))
-      (save-excursion
-        (save-restriction
-          (widen)
-          (let* ((anchored (roam-inline--goto-anchor))
-                 (beg (point)))
-            ;; With an anchor, the section begins with the newline that ends
-            ;; the anchor line, so prune restores the buffer exactly.
-            (when anchored (insert "\n"))
-            (unless (string-empty-p roam-inline-separator)
-              (insert roam-inline-separator)
-              (unless (string-suffix-p "\n" roam-inline-separator)
-                (insert "\n")))
-            (when backlinks
-              (roam-inline--insert-backlinks backlinks))
-            (roam-inline--insert-unlinked-section node)
-            (roam-inline--seal beg (point))))))))
+           (buffer-undo-list t)
+           (roam-inline--file-cache (make-hash-table :test #'equal)))
+      (unwind-protect
+          (save-excursion
+            (save-restriction
+              (widen)
+              (let* ((anchored (roam-inline--goto-anchor))
+                     (beg (point)))
+                ;; With an anchor, the section begins with the newline that
+                ;; ends the anchor line, so prune restores the buffer exactly.
+                (when anchored (insert "\n"))
+                (unless (string-empty-p roam-inline-separator)
+                  (insert roam-inline-separator)
+                  (unless (string-suffix-p "\n" roam-inline-separator)
+                    (insert "\n")))
+                (when backlinks
+                  (roam-inline--insert-backlinks backlinks))
+                (roam-inline--insert-unlinked-section node)
+                (roam-inline--seal beg (point)))))
+        (maphash (lambda (_file buf) (when (buffer-live-p buf) (kill-buffer buf)))
+                 roam-inline--file-cache)))))
 
 ;;;###autoload
 (defun roam-inline-move-here ()
@@ -188,25 +197,35 @@ anchor line, not by cutting and pasting the section itself."
                       (concat "^[ \t]*:ID:[ \t]+" (regexp-quote node-id) "[ \t]*$")
                       end t)))))))
 
+(defun roam-inline--source-buffer (file)
+  "Return a cached buffer holding the contents of FILE.
+Must be called while `roam-inline--file-cache' is bound."
+  (or (gethash file roam-inline--file-cache)
+      (let ((buf (generate-new-buffer " *roam-inline-src*")))
+        (condition-case err
+            (with-current-buffer buf (insert-file-contents file))
+          (error (kill-buffer buf) (signal (car err) (cdr err))))
+        (puthash file buf roam-inline--file-cache))))
+
 (defun roam-inline--content (file point node-id)
   "Return a one-line preview for the link at POINT in FILE.
 This is the line containing the link, minus list bullet or heading stars.
 If that line is the heading of the source node itself (NODE-ID), the
 group title already shows it, so return an empty string."
   (or (ignore-errors
-        (with-temp-buffer
-          (insert-file-contents file)
-          (goto-char point)
-          (beginning-of-line)
-          (if (roam-inline--own-heading-p node-id)
-              ""
-            (let ((line (buffer-substring (line-beginning-position)
-                                          (line-end-position))))
-              (setq line (replace-regexp-in-string
-                          "\\`[ \t]*\\(?:\\*+\\|[-+]\\|[0-9]+[.)]\\)[ \t]+" "" line))
-              (truncate-string-to-width
-               (string-trim (roam-inline--clean-links line))
-               roam-inline-preview-length nil nil "…")))))
+        (with-current-buffer (roam-inline--source-buffer file)
+          (save-excursion
+            (goto-char point)
+            (beginning-of-line)
+            (if (roam-inline--own-heading-p node-id)
+                ""
+              (let ((line (buffer-substring (line-beginning-position)
+                                            (line-end-position))))
+                (setq line (replace-regexp-in-string
+                            "\\`[ \t]*\\(?:\\*+\\|[-+]\\|[0-9]+[.)]\\)[ \t]+" "" line))
+                (truncate-string-to-width
+                 (string-trim (roam-inline--clean-links line))
+                 roam-inline-preview-length nil nil "…"))))))
       ""))
 
 (defun roam-inline--insert-backlink (backlink)
