@@ -2,7 +2,7 @@
 ;; Package-Requires: ((emacs "27.1") (org-roam "2.0"))
 
 ;;; Code:
-;;; Version: 0.6.1
+;;; Version: 0.6.2
 (require 'org-roam)
 (require 'org-roam-mode)
 (require 'seq)
@@ -207,11 +207,32 @@ Must be called while `roam-inline--file-cache' is bound."
           (error (kill-buffer buf) (signal (car err) (cdr err))))
         (puthash file buf roam-inline--file-cache))))
 
+(defun roam-inline--preview (text)
+  "Clean org links in TEXT, trim it and truncate to the preview length."
+  (truncate-string-to-width
+   (string-trim (roam-inline--clean-links text))
+   roam-inline-preview-length nil nil "…"))
+
+(defun roam-inline--subheadings (level)
+  "Return the subheadings below point as indented bullet lines.
+LEVEL is the star count of the heading at point.  Each line is prefixed
+with a newline so the result can be appended to a bullet."
+  (end-of-line)
+  (let (out)
+    (while (and (re-search-forward "^\\(\\*+\\) +\\(.*\\)$" nil t)
+                (> (length (match-string 1)) level))
+      (push (format "\n     %s- %s"
+                    (make-string (* 2 (- (length (match-string 1)) level 1)) ?\s)
+                    (roam-inline--preview (match-string 2)))
+            out))
+    (apply #'concat (nreverse out))))
+
 (defun roam-inline--content (file point node-id)
-  "Return a one-line preview for the link at POINT in FILE.
-This is the line containing the link, minus list bullet or heading stars.
-If that line is the heading of the source node itself (NODE-ID), the
-group title already shows it, so return an empty string."
+  "Return a preview for the link at POINT in FILE.
+This is the line containing the link, minus list bullet or heading stars,
+followed by the subheadings if that line is a heading.  If that line is the
+heading of the source node itself (NODE-ID), the group title already shows
+it, so return an empty string."
   (or (ignore-errors
         (with-current-buffer (roam-inline--source-buffer file)
           (save-excursion
@@ -219,13 +240,13 @@ group title already shows it, so return an empty string."
             (beginning-of-line)
             (if (roam-inline--own-heading-p node-id)
                 ""
-              (let ((line (buffer-substring (line-beginning-position)
+              (let ((level (and (looking-at "\\*+ ") (1- (length (match-string 0)))))
+                    (line (buffer-substring (line-beginning-position)
                                             (line-end-position))))
                 (setq line (replace-regexp-in-string
                             "\\`[ \t]*\\(?:\\*+\\|[-+]\\|[0-9]+[.)]\\)[ \t]+" "" line))
-                (truncate-string-to-width
-                 (string-trim (roam-inline--clean-links line))
-                 roam-inline-preview-length nil nil "…"))))))
+                (concat (roam-inline--preview line)
+                        (and level (roam-inline--subheadings level))))))))
       ""))
 
 (defun roam-inline--insert-backlink (backlink)
