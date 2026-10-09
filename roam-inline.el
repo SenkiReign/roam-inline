@@ -1,8 +1,8 @@
 ;;; roam-inline.el --- Inline backlinks for org-roam v2 -*- lexical-binding: t; -*-
 ;; Package-Requires: ((emacs "27.1") (org-roam "2.0"))
-
+;; Version: 0.6.3
 ;;; Code:
-;;; Version: 0.6.2
+
 (require 'org-roam)
 (require 'org-roam-mode)
 (require 'seq)
@@ -34,6 +34,12 @@ section goes at the end of the buffer.  See `roam-inline-move-here'."
 A newline is appended if the text does not end with one.
 Set to an empty string to omit the separator."
   :type 'string :group 'roam-inline)
+
+(defcustom roam-inline-show-without-backlinks nil
+  "Non-nil means show the section even for nodes that have no backlinks.
+The section then holds only the unlinked references prompt.  By default a
+node that nothing links to gets no section at all, not even the separator."
+  :type 'boolean :group 'roam-inline)
 
 (defvar-local roam-inline-show-unlinked nil)
 
@@ -133,30 +139,32 @@ Return non-nil when an anchor line was used."
 (defun roam-inline--insert ()
   (when-let* ((node (or (org-roam-node-at-point)
                         (progn (ignore-errors (org-roam-db-update-file (buffer-file-name)))
-                               (org-roam-node-at-point))))
-              ;; No backlinks: add no section at all.
-              (backlinks (org-roam-backlinks-get node)))
-    (let* ((inhibit-read-only t)
-           (buffer-undo-list t)
-           (roam-inline--file-cache (make-hash-table :test #'equal)))
-      (unwind-protect
-          (save-excursion
-            (save-restriction
-              (widen)
-              (let* ((anchored (roam-inline--goto-anchor))
-                     (beg (point)))
-                ;; With an anchor, the section begins with the newline that
-                ;; ends the anchor line, so prune restores the buffer exactly.
-                (when anchored (insert "\n"))
-                (unless (string-empty-p roam-inline-separator)
-                  (insert roam-inline-separator)
-                  (unless (string-suffix-p "\n" roam-inline-separator)
-                    (insert "\n")))
-                (roam-inline--insert-backlinks backlinks)
-                (roam-inline--insert-unlinked-section node)
-                (roam-inline--seal beg (point)))))
-        (maphash (lambda (_file buf) (when (buffer-live-p buf) (kill-buffer buf)))
-                 roam-inline--file-cache)))))
+                               (org-roam-node-at-point)))))
+    (let ((backlinks (org-roam-backlinks-get node)))
+      ;; No backlinks: add no section at all, unless the user opted in.
+      (when (or backlinks roam-inline-show-without-backlinks)
+        (let* ((inhibit-read-only t)
+               (buffer-undo-list t)
+               (roam-inline--file-cache (make-hash-table :test #'equal)))
+          (unwind-protect
+              (save-excursion
+                (save-restriction
+                  (widen)
+                  (let* ((anchored (roam-inline--goto-anchor))
+                         (beg (point)))
+                    ;; With an anchor, the section begins with the newline that
+                    ;; ends the anchor line, so prune restores the buffer exactly.
+                    (when anchored (insert "\n"))
+                    (unless (string-empty-p roam-inline-separator)
+                      (insert roam-inline-separator)
+                      (unless (string-suffix-p "\n" roam-inline-separator)
+                        (insert "\n")))
+                    (when backlinks
+                      (roam-inline--insert-backlinks backlinks))
+                    (roam-inline--insert-unlinked-section node)
+                    (roam-inline--seal beg (point)))))
+            (maphash (lambda (_file buf) (when (buffer-live-p buf) (kill-buffer buf)))
+                     roam-inline--file-cache)))))))
 
 ;;;###autoload
 (defun roam-inline-move-here ()
