@@ -115,7 +115,6 @@ Return non-nil when an anchor line was used."
   (if (re-search-forward (roam-inline--anchor-regexp) nil t)
       (progn (end-of-line) t)
     (goto-char (point-max))
-    (unless (bolp) (insert "\n"))
     nil))
 
 (defun roam-inline--seal (beg end)
@@ -133,10 +132,9 @@ Return non-nil when an anchor line was used."
 (defun roam-inline--insert ()
   (when-let* ((node (or (org-roam-node-at-point)
                         (progn (ignore-errors (org-roam-db-update-file (buffer-file-name)))
-                               (org-roam-node-at-point))))
-              ;; No backlinks: add no section at all.
-              (backlinks (org-roam-backlinks-get node)))
-    (let* ((inhibit-read-only t)
+                               (org-roam-node-at-point)))))
+    (let* ((backlinks (org-roam-backlinks-get node))
+           (inhibit-read-only t)
            (buffer-undo-list t)
            (roam-inline--file-cache (make-hash-table :test #'equal)))
       (unwind-protect
@@ -145,16 +143,19 @@ Return non-nil when an anchor line was used."
               (widen)
               (let* ((anchored (roam-inline--goto-anchor))
                      (beg (point)))
-                ;; With an anchor, the section begins with the newline that
-                ;; ends the anchor line, so prune restores the buffer exactly.
-                (when anchored (insert "\n"))
-                (unless (string-empty-p roam-inline-separator)
-                  (insert roam-inline-separator)
-                  (unless (string-suffix-p "\n" roam-inline-separator)
-                    (insert "\n")))
-                (roam-inline--insert-backlinks backlinks)
+                (when backlinks
+                  (roam-inline--insert-backlinks backlinks))
                 (roam-inline--insert-unlinked-section node)
-                (roam-inline--seal beg (point)))))
+                (when (> (point) beg)
+                  (save-excursion
+                    (goto-char beg)
+                    ;; Include any added newline in the generated section.
+                    (when (or anchored (not (bolp))) (insert "\n"))
+                    (unless (string-empty-p roam-inline-separator)
+                      (insert roam-inline-separator)
+                      (unless (string-suffix-p "\n" roam-inline-separator)
+                        (insert "\n"))))
+                  (roam-inline--seal beg (point))))))
         (maphash (lambda (_file buf) (when (buffer-live-p buf) (kill-buffer buf)))
                  roam-inline--file-cache)))))
 
@@ -285,9 +286,9 @@ The group heading is also followable, so a link with no preview stays reachable.
 ;; Unlinked references, via ripgrep
 
 (defun roam-inline--insert-unlinked-section (node)
-  (insert "* Unlinked references\n")
   (if roam-inline-show-unlinked
       (roam-inline--insert-unlinked-refs node)
+    (insert "* Unlinked references\n")
     (let ((beg (point)))
       (insert "[Show unlinked references]")
       (put-text-property beg (point) 'roam-inline-toggle t)
@@ -301,12 +302,12 @@ The group heading is also followable, so a link with no preview stays reachable.
 
 (defun roam-inline--insert-unlinked-refs (node)
   (if (not (executable-find roam-inline-rg-executable))
-      (insert "  (ripgrep not found)\n")
+      (insert "* Unlinked references\n  (ripgrep not found)\n")
     (let* ((terms (cons (org-roam-node-title node) (org-roam-node-aliases node)))
            (self-file (org-roam-node-file node))
            (hits (seq-mapcat (lambda (term) (roam-inline--rg-search term self-file)) terms)))
-      (if (null hits)
-          (insert "  (none)\n")
+      (when hits
+        (insert "* Unlinked references\n")
         (pcase-dolist (`(,file ,line ,text) hits)
           (let ((beg (point)))
             (insert (format "- %s:%s: %s\n"
