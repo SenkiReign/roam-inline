@@ -1,6 +1,6 @@
 ;;; roam-inline.el --- Inline backlinks for org-roam v2 -*- lexical-binding: t; -*-
 ;; Package-Requires: ((emacs "27.1") (org-roam "2.0"))
-;; Version: 0.6.3
+;; Version: 0.7.0
 ;;; Code:
 
 (require 'org-roam)
@@ -41,6 +41,18 @@ The section then holds only the unlinked references prompt.  By default a
 node that nothing links to gets no section at all, not even the separator."
   :type 'boolean :group 'roam-inline)
 
+(defcustom roam-inline-show-parent t
+  "Non-nil means prefix each backlink with the heading it sits under.
+For a link in a body line or list item this is the closest heading above
+it.  For a link on a heading line it is the closest shallower heading.
+Nothing is shown when that heading is the source node's own heading (the
+group title already shows it) or when the link is above the first heading."
+  :type 'boolean :group 'roam-inline)
+
+(defface roam-inline-parent '((t :inherit shadow))
+  "Face for the parent heading shown before a backlink."
+  :group 'roam-inline)
+
 (defvar-local roam-inline-show-unlinked nil)
 
 (defvar roam-inline--file-cache nil
@@ -54,6 +66,7 @@ backlinks point into it.")
 (defvar roam-inline-map
   (let ((m (make-sparse-keymap)))
     (define-key m (kbd "RET") #'roam-inline-follow)
+    (define-key m [mouse-2] #'roam-inline-follow-mouse)
     (define-key m (kbd "C-c C-c") #'roam-inline-refresh)
     m))
 
@@ -187,11 +200,44 @@ anchor line, not by cutting and pasting the section itself."
 
 ;; Backlinks: one group per source node, one bullet per occurrence
 
-(defun roam-inline--clean-links (text)
-  "Replace org link syntax in TEXT with just its description/target."
-  (let ((text (replace-regexp-in-string
-               "\\[\\[[^]]*\\]\\[\\([^]]*\\)\\]\\]" "\\1" text)))
-    (replace-regexp-in-string "\\[\\[\\([^]]*\\)\\]\\]" "\\1" text)))
+;; Links in previews are NOT inserted as real org link syntax.  The buffer is
+;; parsed by org-roam's db sync, and `[[...]]' text in the generated section
+;; could be indexed as outgoing links of this node.  Instead the description
+;; is shown with link styling and the original link is kept in the
+;; `roam-inline-link' text property, to be opened on RET or mouse click.
+
+(defconst roam-inline--link-regexp
+  "\\[\\[\\([^]]+\\)\\]\\(?:\\[\\([^]]*\\)\\]\\)?\\]"
+  "Match an org bracket link.  Group 1 is the target, group 2 the description.")
+
+(defun roam-inline--plain (s face)
+  "Return S, styled with FACE when FACE is non-nil."
+  (if (and face (not (string-empty-p s)))
+      (propertize s 'face face 'font-lock-face face)
+    s))
+
+(defun roam-inline--linkify (text &optional face)
+  "Return TEXT with each org link replaced by a clickable description.
+Text outside links gets FACE when it is non-nil.  Both `face' and
+`font-lock-face' are set, because font-lock strips `face' on refontify."
+  (let ((pos 0) out)
+    (while (string-match roam-inline--link-regexp text pos)
+      (let* ((raw (match-string 0 text))
+             (target (match-string 1 text))
+             (desc (match-string 2 text))
+             (shown (if (or (null desc) (string-empty-p desc)) target desc)))
+        (push (roam-inline--plain (substring text pos (match-beginning 0)) face) out)
+        (push (propertize shown
+                          'face 'org-link
+                          'font-lock-face 'org-link
+                          'mouse-face 'highlight
+                          'follow-link t
+                          'help-echo target
+                          'roam-inline-link raw)
+              out)
+        (setq pos (match-end 0))))
+    (push (roam-inline--plain (substring text pos) face) out)
+    (apply #'concat (nreverse out))))
 
 (defun roam-inline--own-heading-p (node-id)
   "Non-nil if point is on a heading whose property drawer holds NODE-ID."
@@ -205,6 +251,24 @@ anchor line, not by cutting and pasting the section itself."
                       (concat "^[ \t]*:ID:[ \t]+" (regexp-quote node-id) "[ \t]*$")
                       end t)))))))
 
+(defun roam-inline--parent-heading (level node-id)
+  "Return the title of the heading that contains the line at point, or nil.
+Point must be at the beginning of the line.  LEVEL is the star count if
+that line is itself a heading, else nil; then only a shallower heading
+counts.  Return nil if the heading found is the source node's own heading
+\(NODE-ID), because the group title already shows it, or if it is blank."
+  (save-excursion
+    (let (done title)
+      (while (and (not done)
+                  (re-search-backward "^\\(\\*+\\) +\\(.*\\)$" nil t))
+        (when (or (null level) (< (length (match-string 1)) level))
+          (setq done t)
+          (let ((text (match-string 2)))
+            (unless (or (string-blank-p text)
+                        (roam-inline--own-heading-p node-id))
+              (setq title text)))))
+      title)))
+
 (defun roam-inline--source-buffer (file)
   "Return a cached buffer holding the contents of FILE.
 Must be called while `roam-inline--file-cache' is bound."
@@ -215,10 +279,11 @@ Must be called while `roam-inline--file-cache' is bound."
           (error (kill-buffer buf) (signal (car err) (cdr err))))
         (puthash file buf roam-inline--file-cache))))
 
-(defun roam-inline--preview (text)
-  "Clean org links in TEXT, trim it and truncate to the preview length."
+(defun roam-inline--preview (text &optional face)
+  "Linkify TEXT, trim it and truncate to the preview length.
+Text outside links gets FACE when it is non-nil."
   (truncate-string-to-width
-   (string-trim (roam-inline--clean-links text))
+   (string-trim (roam-inline--linkify text face))
    roam-inline-preview-length nil nil "…"))
 
 (defun roam-inline--subheadings (level)
@@ -238,9 +303,10 @@ with a newline so the result can be appended to a bullet."
 (defun roam-inline--content (file point node-id)
   "Return a preview for the link at POINT in FILE.
 This is the line containing the link, minus list bullet or heading stars,
-followed by the subheadings if that line is a heading.  If that line is the
-heading of the source node itself (NODE-ID), the group title already shows
-it, so return an empty string."
+followed by the subheadings if that line is a heading.  With
+`roam-inline-show-parent' it is prefixed by the heading the line sits under.
+If that line is the heading of the source node itself (NODE-ID), the group
+title already shows it, so return an empty string."
   (or (ignore-errors
         (with-current-buffer (roam-inline--source-buffer file)
           (save-excursion
@@ -248,12 +314,19 @@ it, so return an empty string."
             (beginning-of-line)
             (if (roam-inline--own-heading-p node-id)
                 ""
-              (let ((level (and (looking-at "\\*+ ") (1- (length (match-string 0)))))
-                    (line (buffer-substring (line-beginning-position)
-                                            (line-end-position))))
+              (let* ((level (and (looking-at "\\*+ ") (1- (length (match-string 0)))))
+                     (line (buffer-substring (line-beginning-position)
+                                             (line-end-position)))
+                     (parent (and roam-inline-show-parent
+                                  (roam-inline--parent-heading level node-id))))
                 (setq line (replace-regexp-in-string
                             "\\`[ \t]*\\(?:\\*+\\|[-+]\\|[0-9]+[.)]\\)[ \t]+" "" line))
-                (concat (roam-inline--preview line)
+                (concat (and parent
+                             (concat (roam-inline--preview parent 'roam-inline-parent)
+                                     (propertize " › "
+                                                 'face 'roam-inline-parent
+                                                 'font-lock-face 'roam-inline-parent)))
+                        (roam-inline--preview line)
                         (and level (roam-inline--subheadings level))))))))
       ""))
 
@@ -266,7 +339,8 @@ it, so return an empty string."
          (beg (point)))
     (unless (string-empty-p text)
       (insert (format "   - %s\n" text))
-      (set-text-properties beg (point)
+      ;; add, don't set: the link properties inside TEXT must survive.
+      (add-text-properties beg (point)
                            (list 'roam-inline-file file 'roam-inline-point pt)))))
 
 (defun roam-inline--insert-backlinks (backlinks)
@@ -337,10 +411,19 @@ The group heading is also followable, so a link with no preview stays reachable.
             (push (list file line text) results))))
       (nreverse results))))
 
+(defun roam-inline--open-link ()
+  "Open the org link stored at point.
+Relative file links resolve against the source file's directory."
+  (let* ((raw (get-text-property (point) 'roam-inline-link))
+         (file (get-text-property (point) 'roam-inline-file))
+         (default-directory (if file (file-name-directory file) default-directory)))
+    (org-link-open-from-string raw)))
+
 (defun roam-inline-follow ()
   (interactive)
   (cond
    ((get-text-property (point) 'roam-inline-toggle) (roam-inline-unlinked-toggle))
+   ((get-text-property (point) 'roam-inline-link) (roam-inline--open-link))
    ((get-text-property (point) 'roam-inline-file)
     (let ((file (get-text-property (point) 'roam-inline-file))
           (pt (get-text-property (point) 'roam-inline-point))
@@ -348,6 +431,12 @@ The group heading is also followable, so a link with no preview stays reachable.
       (find-file file)
       (cond (pt (goto-char pt)) (line (goto-char (point-min)) (forward-line (1- line))))
       (org-fold-show-context)))))
+
+(defun roam-inline-follow-mouse (event)
+  "Move point to EVENT, then follow what is there."
+  (interactive "e")
+  (mouse-set-point event)
+  (roam-inline-follow))
 
 (provide 'roam-inline)
 ;;; roam-inline.el ends here
