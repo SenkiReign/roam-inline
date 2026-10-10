@@ -1,6 +1,6 @@
 ;;; roam-inline.el --- Inline backlinks for org-roam v2 -*- lexical-binding: t; -*-
 ;; Package-Requires: ((emacs "27.1") (org-roam "2.0"))
-;; Version: 0.7.0
+;; Version: 0.7.1
 ;;; Code:
 
 (require 'org-roam)
@@ -29,7 +29,7 @@ Move this line to move the section.  If the buffer has no such line, the
 section goes at the end of the buffer.  See `roam-inline-move-here'."
   :type 'string :group 'roam-inline)
 
-(defcustom roam-inline-separator "\n-------\n\n"
+(defcustom roam-inline-separator "\n\n-------\n\n"
   "Text inserted before backlinks and unlinked references.
 A newline is appended if the text does not end with one.
 Set to an empty string to omit the separator."
@@ -137,14 +137,23 @@ Return non-nil when an anchor line was used."
     (unless (bolp) (insert "\n"))
     nil))
 
-(defun roam-inline--seal (beg end)
-  "Mark BEG..END as generated, read-only, and bind the section keymap."
+(defun roam-inline--seal (beg end anchored)
+  "Mark BEG..END as generated, read-only, and bind the section keymap.
+When ANCHORED, BEG is the end of the anchor line, so insertion at BEG is
+blocked to protect that line.  Otherwise BEG starts a line of its own and
+stays editable, so the user can type on the last line before the section."
   (add-text-properties beg end '(roam-inline-managed t
                                  read-only t
                                  rear-nonsticky (roam-inline-managed)))
-  (add-text-properties beg (1+ beg) '(roam-inline-start t
-                                      front-sticky (read-only)))
-  (let ((ov (make-overlay beg end)))
+  (add-text-properties beg (1+ beg)
+                       (if anchored
+                           '(roam-inline-start t front-sticky (read-only))
+                         '(roam-inline-start t)))
+  ;; The overlay starts one char after BEG, so the section keymap (RET ->
+  ;; `roam-inline-follow') is not active when point is at BEG, where the user
+  ;; types.  The keymap is looked up by the character at point, so this holds
+  ;; whatever the overlay's front-advance setting.
+  (let ((ov (make-overlay (1+ beg) end)))
     (overlay-put ov 'keymap roam-inline-map)
     (overlay-put ov 'roam-inline t)
     (overlay-put ov 'evaporate t)))
@@ -175,7 +184,7 @@ Return non-nil when an anchor line was used."
                     (when backlinks
                       (roam-inline--insert-backlinks backlinks))
                     (roam-inline--insert-unlinked-section node)
-                    (roam-inline--seal beg (point)))))
+                    (roam-inline--seal beg (point) anchored))))
             (maphash (lambda (_file buf) (when (buffer-live-p buf) (kill-buffer buf)))
                      roam-inline--file-cache)))))))
 
