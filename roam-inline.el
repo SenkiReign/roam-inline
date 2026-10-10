@@ -1,6 +1,6 @@
 ;;; roam-inline.el --- Inline backlinks for org-roam v2 -*- lexical-binding: t; -*-
 ;; Package-Requires: ((emacs "27.1") (org-roam "2.0"))
-;; Version: 0.7.2
+;; Version: 0.7.3
 ;;; Code:
 
 (require 'org-roam)
@@ -29,18 +29,10 @@ Move this line to move the section.  If the buffer has no such line, the
 section goes at the end of the buffer.  See `roam-inline-move-here'."
   :type 'string :group 'roam-inline)
 
-(defcustom roam-inline-separator ""
-  "Text inserted before backlinks and unlinked references.
-A newline is appended if the text does not end with one.
-Empty by default: generated text that precedes the first heading of the
-section becomes part of the previous heading's subtree, which makes the
-end of that heading's fold read-only."
-  :type 'string :group 'roam-inline)
-
 (defcustom roam-inline-show-without-backlinks nil
   "Non-nil means show the section even for nodes that have no backlinks.
 The section then holds only the unlinked references prompt.  By default a
-node that nothing links to gets no section at all, not even the separator."
+node that nothing links to gets no section at all."
   :type 'boolean :group 'roam-inline)
 
 (defcustom roam-inline-show-parent t
@@ -175,10 +167,6 @@ after it stay blocked."
                   (widen)
                   (roam-inline--goto-anchor)
                   (let ((beg (point)))
-                    (unless (string-empty-p roam-inline-separator)
-                      (insert roam-inline-separator)
-                      (unless (string-suffix-p "\n" roam-inline-separator)
-                        (insert "\n")))
                     (when backlinks
                       (roam-inline--insert-backlinks backlinks))
                     (roam-inline--insert-unlinked-section node)
