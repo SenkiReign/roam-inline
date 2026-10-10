@@ -1,6 +1,6 @@
 ;;; roam-inline.el --- Inline backlinks for org-roam v2 -*- lexical-binding: t; -*-
 ;; Package-Requires: ((emacs "27.1") (org-roam "2.0"))
-;; Version: 0.7.1
+;; Version: 0.7.2
 ;;; Code:
 
 (require 'org-roam)
@@ -29,10 +29,12 @@ Move this line to move the section.  If the buffer has no such line, the
 section goes at the end of the buffer.  See `roam-inline-move-here'."
   :type 'string :group 'roam-inline)
 
-(defcustom roam-inline-separator "\n\n-------\n\n"
+(defcustom roam-inline-separator ""
   "Text inserted before backlinks and unlinked references.
 A newline is appended if the text does not end with one.
-Set to an empty string to omit the separator."
+Empty by default: generated text that precedes the first heading of the
+section becomes part of the previous heading's subtree, which makes the
+end of that heading's fold read-only."
   :type 'string :group 'roam-inline)
 
 (defcustom roam-inline-show-without-backlinks nil
@@ -128,27 +130,26 @@ backlinks point into it.")
             (setq pos start)))))))
 
 (defun roam-inline--goto-anchor ()
-  "Move point to where the section goes.
-Return non-nil when an anchor line was used."
+  "Move point to the start of the line where the section goes.
+That is the line after the anchor line, or the end of the buffer when
+there is no anchor.  The newline ending the anchor line is never part of
+the section, so the line above the section stays editable."
   (goto-char (point-min))
   (if (re-search-forward (roam-inline--anchor-regexp) nil t)
-      (progn (end-of-line) t)
+      (progn (end-of-line)
+             (if (eobp) (insert "\n") (forward-char 1)))
     (goto-char (point-max))
-    (unless (bolp) (insert "\n"))
-    nil))
+    (unless (bolp) (insert "\n"))))
 
-(defun roam-inline--seal (beg end anchored)
+(defun roam-inline--seal (beg end)
   "Mark BEG..END as generated, read-only, and bind the section keymap.
-When ANCHORED, BEG is the end of the anchor line, so insertion at BEG is
-blocked to protect that line.  Otherwise BEG starts a line of its own and
-stays editable, so the user can type on the last line before the section."
+BEG starts a line of its own and is not front-sticky, so the line above
+the section stays editable.  The section's text and the position right
+after it stay blocked."
   (add-text-properties beg end '(roam-inline-managed t
                                  read-only t
                                  rear-nonsticky (roam-inline-managed)))
-  (add-text-properties beg (1+ beg)
-                       (if anchored
-                           '(roam-inline-start t front-sticky (read-only))
-                         '(roam-inline-start t)))
+  (add-text-properties beg (1+ beg) '(roam-inline-start t))
   ;; The overlay starts one char after BEG, so the section keymap (RET ->
   ;; `roam-inline-follow') is not active when point is at BEG, where the user
   ;; types.  The keymap is looked up by the character at point, so this holds
@@ -172,11 +173,8 @@ stays editable, so the user can type on the last line before the section."
               (save-excursion
                 (save-restriction
                   (widen)
-                  (let* ((anchored (roam-inline--goto-anchor))
-                         (beg (point)))
-                    ;; With an anchor, the section begins with the newline that
-                    ;; ends the anchor line, so prune restores the buffer exactly.
-                    (when anchored (insert "\n"))
+                  (roam-inline--goto-anchor)
+                  (let ((beg (point)))
                     (unless (string-empty-p roam-inline-separator)
                       (insert roam-inline-separator)
                       (unless (string-suffix-p "\n" roam-inline-separator)
@@ -184,7 +182,7 @@ stays editable, so the user can type on the last line before the section."
                     (when backlinks
                       (roam-inline--insert-backlinks backlinks))
                     (roam-inline--insert-unlinked-section node)
-                    (roam-inline--seal beg (point) anchored))))
+                    (roam-inline--seal beg (point)))))
             (maphash (lambda (_file buf) (when (buffer-live-p buf) (kill-buffer buf)))
                      roam-inline--file-cache)))))))
 
